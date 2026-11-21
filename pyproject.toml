@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sql-ghost"
+version = "0.1.0"
+description = "Natural language to SQL, validated against a synthetic shadow copy of your database"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Ata Perata" }]
+requires-python = ">=3.11"
+dependencies = ["sqlglot>=25"]
+keywords = ["sql", "text-to-sql", "nl2sql", "sqlite", "postgres", "synthetic-data", "privacy"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Topic :: Database",
+    "Environment :: Console",
+]
+
+[project.optional-dependencies]
+postgres = ["psycopg[binary]>=3.1"]
+dev = ["pytest>=8", "ruff>=0.5", "psycopg[binary]>=3.1"]
+
+[project.scripts]
+sqlghost = "sqlghost.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+sqlghost = ["data/*.sqlite", "static/*"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF"]
+ignore = ["RUF001", "RUF012"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
