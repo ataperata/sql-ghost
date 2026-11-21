@@ -11,6 +11,8 @@ import os
 import re
 import sqlite3
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -171,6 +173,7 @@ class SQLiteSource:
         if not self.path.exists():
             raise SourceError(f"SQLite file not found: {self.path}")
         self.label = self.path.name
+        self._session: sqlite3.Connection | None = None
 
     # Trusted connection used for introspection and profiling. Read only.
     def _connect(self) -> sqlite3.Connection:
@@ -178,7 +181,23 @@ class SQLiteSource:
         conn.execute("PRAGMA query_only = 1")
         return conn
 
+    @contextmanager
+    def session(self) -> Iterator[None]:
+        """Reuse one read-only connection for every query() inside the block."""
+        if self._session is not None:
+            yield
+            return
+        self._session = self._connect()
+        try:
+            yield
+        finally:
+            conn, self._session = self._session, None
+            conn.close()
+
     def query(self, sql: str, params: tuple[Any, ...] = ()) -> list[tuple[Any, ...]]:
+        shared = self._session
+        if shared is not None:
+            return shared.execute(sql, params).fetchall()
         conn = self._connect()
         try:
             return conn.execute(sql, params).fetchall()
@@ -338,6 +357,7 @@ class PostgresSource:
         query = "&".join(f"{k}={v[0]}" for k, v in qs.items())
         self.url = parsed._replace(query=query).geturl()
         self.label = f"{parsed.hostname or 'localhost'}/{parsed.path.lstrip('/')}"
+        self._session: Any = None
 
     def _connect(self):  # type: ignore[no-untyped-def]
         import psycopg
@@ -348,7 +368,32 @@ class PostgresSource:
             cur.execute("SELECT set_config('search_path', %s, true)", (self.schema_name,))
         return conn
 
+    @contextmanager
+    def session(self) -> Iterator[None]:
+        """Run every query() inside the block in one read-only transaction.
+
+        Opening a connection per query costs a full connect and authentication each time,
+        which dominated profiling. One transaction also gives the queries one snapshot.
+        """
+        if self._session is not None:
+            yield
+            return
+        self._session = self._connect()
+        try:
+            yield
+        finally:
+            conn, self._session = self._session, None
+            try:
+                conn.rollback()
+            finally:
+                conn.close()
+
     def query(self, sql: str, params: tuple[Any, ...] = ()) -> list[tuple[Any, ...]]:
+        shared = self._session
+        if shared is not None:
+            with shared.cursor() as cur:
+                cur.execute(sql, params or None)
+                return cur.fetchall()
         conn = self._connect()
         try:
             with conn.cursor() as cur:

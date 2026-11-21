@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import datetime as dt
 import re
+from contextlib import nullcontext
 from decimal import Decimal
 from typing import Any
 
@@ -69,6 +70,12 @@ def _plain(value: Any) -> Any:
 
 
 def profile_source(source: Any, schema: Schema) -> Profile:
+    session = getattr(source, "session", None)
+    with session() if session is not None else nullcontext():
+        return _profile_tables(source, schema)
+
+
+def _profile_tables(source: Any, schema: Schema) -> Profile:
     tables: dict[str, TableProfile] = {}
     for name, table in schema.tables.items():
         q = quote_ident(name)
@@ -133,9 +140,13 @@ def _profile_column(source: Any, qtable: str, col: m.Column, row_count: int, is_
 
 
 def _quantiles(source: Any, qtable: str, qc: str, non_null: int) -> list[Any]:
-    points = []
-    for i in range(QUANTILE_POINTS):
-        offset = min(non_null - 1, round(i * (non_null - 1) / (QUANTILE_POINTS - 1)))
-        row = source.query(f"SELECT {qc} FROM {qtable} WHERE {qc} IS NOT NULL ORDER BY {qc} LIMIT 1 OFFSET {offset}")
-        points.append(_plain(row[0][0]))
-    return points
+    offsets = [min(non_null - 1, round(i * (non_null - 1) / (QUANTILE_POINTS - 1))) for i in range(QUANTILE_POINTS)]
+    # One sort of the column picks every offset, instead of one ORDER BY ... OFFSET
+    # query (and sort) per point. Works on SQLite 3.25+ and Postgres.
+    wanted = ", ".join(str(o) for o in sorted(set(offsets)))
+    rows = source.query(
+        f"SELECT rn, v FROM (SELECT {qc} AS v, ROW_NUMBER() OVER (ORDER BY {qc}) - 1 AS rn "
+        f"FROM {qtable} WHERE {qc} IS NOT NULL) AS ranked WHERE rn IN ({wanted})"
+    )
+    by_offset = {int(rn): value for rn, value in rows}
+    return [_plain(by_offset[o]) for o in offsets]
