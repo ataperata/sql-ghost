@@ -274,6 +274,7 @@ class PostgresWriter:
 
         self.conn = psycopg.connect(url, autocommit=False)
         self.cur = self.conn.cursor()
+        self.row_cur = psycopg.ClientCursor(self.conn)
         s = quote_ident(shadow_schema)
         self.cur.execute(f"DROP SCHEMA IF EXISTS {s} CASCADE")
         self.cur.execute(f"CREATE SCHEMA {s}")
@@ -299,17 +300,21 @@ class PostgresWriter:
     def insert(self, table: str, cols: list[str], values: list[Any]) -> bool:
         import psycopg
 
+        # Each row gets its own savepoint so a rejected row does not abort the build.
+        # Savepoint, insert and release go to the server as one query string, so an
+        # accepted row costs one round trip instead of three. That needs client-side
+        # parameter binding, which psycopg's ClientCursor does with proper escaping.
         sql = (
+            "SAVEPOINT sqlghost_row; "
             f"INSERT INTO {quote_ident(table)} ({', '.join(quote_ident(c) for c in cols)}) "
-            f"VALUES ({', '.join('%s' for _ in cols)})"
+            f"VALUES ({', '.join('%s' for _ in cols)}); "
+            "RELEASE SAVEPOINT sqlghost_row"
         )
         try:
-            with self.conn.transaction():
-                self.cur.execute(sql, values)
+            self.row_cur.execute(sql, values)
             return True
-        except psycopg.errors.IntegrityError:
-            return False
-        except psycopg.errors.DataError:
+        except (psycopg.errors.IntegrityError, psycopg.errors.DataError):
+            self.row_cur.execute("ROLLBACK TO SAVEPOINT sqlghost_row; RELEASE SAVEPOINT sqlghost_row")
             return False
 
     def finish(self) -> None:

@@ -123,3 +123,31 @@ def test_rules_engine_on_postgres(pg_ghost):
     res = pg_ghost.ask("How many orders by tier", provider="rules")
     assert res.report.passed, res.translation.sql
     assert res.result is not None
+
+
+def test_writer_skips_rejected_rows_and_keeps_going(pg_ghost):
+    import datetime as dt
+    from decimal import Decimal
+
+    import psycopg
+
+    from sqlghost.shadow import PostgresWriter
+
+    writer = PostgresWriter(PG_SHADOW, "sqlghost_writer_test", pg_ghost.schema)
+    cust = ["customer_id", "email", "tier", "joined_at"]
+    order = ["order_id", "customer_id", "state", "total", "placed_on"]
+    when = dt.datetime(2025, 3, 1, 12, 30)
+    assert not writer.insert("customers", cust, [1, "a@x.test", "gold", when])  # CHECK
+    assert writer.insert("customers", cust, [1, "o'brien; DROP TABLE orders@x.test", "pro", when])
+    assert not writer.insert("customers", cust, [2, "o'brien; DROP TABLE orders@x.test", "pro", when])  # UNIQUE
+    assert not writer.insert("orders", order, [1, 99, "paid", Decimal("5.00"), dt.date(2025, 1, 2)])  # FK
+    assert not writer.insert("orders", order, [1, 1, "lost", Decimal("5.00"), dt.date(2025, 1, 2)])  # enum
+    assert writer.insert("orders", order, [1, 1, "paid", Decimal("5.25"), dt.date(2025, 1, 2)])
+    writer.finish()
+
+    with psycopg.connect(PG_SHADOW) as conn:
+        customers = conn.execute("SELECT * FROM sqlghost_writer_test.customers").fetchall()
+        orders = conn.execute("SELECT * FROM sqlghost_writer_test.orders").fetchall()
+        conn.execute("DROP SCHEMA sqlghost_writer_test CASCADE")
+    assert customers == [(1, "o'brien; DROP TABLE orders@x.test", "pro", when)]
+    assert orders == [(1, 1, "paid", Decimal("5.25"), dt.date(2025, 1, 2))]
